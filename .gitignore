@@ -6,7 +6,7 @@ __pycache__/
 # C extensions
 *.so
 dataset.csv
-*.db
+#*.db
 # Distribution / packaging
 .vscode/
 .idea/

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PriceSense</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        #category-selector, #events, #prediction {
+            margin-bottom: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        select, button {
+            margin-top: 10px;
+            padding: 5px;
+        }
+        #event-list {
+            list-style-type: none;
+            padding: 0;
+        }
+        #event-list li {
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #f4f4f4;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <h1>PriceSense - Simulador de clasificación de usuario</h1>
+    <div id="api-key-input">
+        <h2>API Key</h2>
+        <input type="password" id="api-key" placeholder="Introduce tu API Key">
+    </div>
+    <div id="category-selector">
+        <h2>Seleccionar Categoría</h2>
+        <select id="category-select">
+            <option value="">Seleccione una categoría</option>
+            {% for category in categories %}
+            <option value="{{ category }}">{{ category }}</option>
+            {% endfor %}
+        </select>
+        <button onclick="loadEvents()">Cargar Eventos</button>
+    </div>
+    <div id="events">
+        <h2>Eventos de Usuario</h2>
+        <ul id="event-list"></ul>
+    </div>
+    <div id="prediction">
+        <h2>Predicción</h2>
+        <button onclick="predictEvents()">Predecir</button>
+        <p id="prediction-result">No disponible</p>
+    </div>
+
+    <script>
+        let currentEvents = [];
+
+        function getApiKey() {
+            return document.getElementById('api-key').value;
+        }
+
+        function loadEvents() {
+            const category = document.getElementById('category-select').value;
+            const apiKey = getApiKey();
+            if (!category) return;
+            if (!apiKey) {
+                alert('Por favor, introduce una API Key');
+                return;
+            }
+
+            fetch(`/events/${category}`, {
+                headers: {
+                    'X-API-Key': apiKey
+                }
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Error de API Key o de red');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    currentEvents = data.events;
+                    const eventList = document.getElementById('event-list');
+                    eventList.innerHTML = '';
+                    data.events.forEach(event => {
+                        const li = document.createElement('li');
+                        li.textContent = `${event.event_time} - ${event.event_type} - ${event.product_id} - $${event.price}`;
+                        eventList.appendChild(li);
+                    });
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error al cargar los eventos. Verifica tu API Key.');
+                });
+        }
+
+        function predictEvents() {
+            if (currentEvents.length === 0) {
+                alert('No hay eventos para predecir. Por favor, cargue eventos primero.');
+                return;
+            }
+
+            const apiKey = getApiKey();
+            if (!apiKey) {
+                alert('Por favor, introduce una API Key');
+                return;
+            }
+
+            fetch('/predict', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': apiKey
+                },
+                body: JSON.stringify(currentEvents)
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Error de API Key o de red');
+                }
+                return response.json();
+            })
+            .then(data => {
+                const prediction = data.predictions[0] === 1 ? 'Compra' : 'No compra';
+                const probability = (data.probabilities[0] * 100).toFixed(2) + '%';
+                document.getElementById('prediction-result').textContent = 
+                    `Predicción: ${prediction}, Probabilidad: ${probability}`;
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error al obtener la predicción. Verifica tu API Key.');
+            });
+        }
+    </script>
+</body>
+</html>

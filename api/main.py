@@ -1,134 +1,125 @@
-"""
-Datos de entrada del modelo:
-['age', 'hypertension', 'heart_disease', 'avg_glucose_level', 'bmi',
-       'gender_Male', 'gender_Other', 'ever_married_Yes',
-       'work_type_Never_worked', 'work_type_Private',
-       'work_type_Self-employed', 'work_type_children', 'Residence_type_Urban',
-       'smoking_status_formerly smoked', 'smoking_status_never smoked',
-       'smoking_status_smokes']
-
-{
-    'age': int,
-    'hypertension': int (1/0),
-    'gender': str (male/female/other),
-    'ever_married_Yes': int (1/0),
-    'heart_disease': int (1/0),
-    'avg_glucose_level': int,
-    'bmi': int,
-    'work_type': str (never worked/private/self-employed/children)
-    'residence_type': str (urban)
-    'smoking_status': str (formerly smoked/never smoked/smokes)
-}
-
-{
-    "age": 33,
-    "hypertension": 1,
-    "gender": "male",
-    "ever_married_Yes": 1,
-    "heart_disease": 0,
-    "avg_glucose_level": 70,
-    "bmi": 29,
-    "work_type": "private",
-    "residence_type": "urban",
-    "smoking_status": "never smoked"
-}
-
-{
-    "age": 75,
-    "hypertension": 1,
-    "gender": "male",
-    "ever_married_Yes": 1,
-    "heart_disease": 1,
-    "avg_glucose_level": 120,
-    "bmi": 29,
-    "work_type": "private",
-    "residence_type": "urban",
-    "smoking_status": "never smoked"
-}
-
-"""
-from fastapi import FastAPI
-import joblib
+import os
+from fastapi import FastAPI, Request, HTTPException,  Depends, status
+from fastapi.security import APIKeyHeader
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 import pandas as pd
+from BuyerClassification import BuyerClassification
+import sqlite3
 
-model = joblib.load('model.sav')
+database_path = "database/database.db"
+
+# Cargar el modelo
+loaded_model = BuyerClassification.load_model('BuyerClassification.joblib')
+
+# Leer la API_KEY del archivo
+try:
+    with open('.creds/API_KEY', 'r') as f:
+        API_KEY = f.read().strip()
+except FileNotFoundError:
+    raise Exception("API_KEY file not found. Please create .creds/API_KEY file with your API key.")
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def get_api_key(api_key_header: str = Depends(api_key_header)):
+    if api_key_header == API_KEY:
+        return api_key_header   
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid API Key",
+    )
 
 app = FastAPI()
 
-def gender_encoding(message):
-    gender_encoded = {'gender_Male': 0, 'gender_Other': 0}
-    if message['gender'].lower() == 'male':
-        gender_encoded['gender_Male'] = 1
-    elif message['gender'].lower() == 'other':
-        gender_encoded['gender_Other'] = 1
+# Configurar Jinja2Templates
+templates = Jinja2Templates(directory="templates/")
 
-    del message['gender']
+class Event(BaseModel):
+    event_time: str
+    event_type: str
+    product_id: str
+    category_id: str
+    category_1: str
+    brand: str
+    price: float
+    user_id: int
+    user_session: str
 
-    return message.update(gender_encoded)
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    # Obtener las categorías únicas
+    conn = sqlite3.connect(database_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT category_1 FROM categories")
+    categories = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    
+    return templates.TemplateResponse("store.html", {"request": request, "categories": categories})
 
-def work_type_encoding(message):
-    work_type_encoded = {'work_type_Never_worked': 0, 'work_type_Private': 0,
-                         'work_type_Self-employed': 0, 'work_type_children': 0}
+@app.get("/events/{category}")
+async def get_events(category: str, api_key: str = Depends(get_api_key)):
+    conn = sqlite3.connect(database_path)
+    cursor = conn.cursor()
+    
+    # Obtener los eventos del usuario aleatorio para la categoría seleccionada
+    cursor.execute(f"""
+        WITH random_user AS (
+            SELECT user_id
+            FROM selected_events
+            WHERE category_1 = ?
+            ORDER BY RANDOM()
+            LIMIT 1
+        )
+        SELECT
+            event_time,
+            event_type,
+            product_id,
+            category_id,
+            category_1,
+            brand,
+            price,
+            user_id,
+            user_session
+        FROM selected_events
+        WHERE
+            user_id = (SELECT user_id FROM random_user)
+            AND event_type != 'purchase'
+            AND category_1 = ?
+        ORDER BY event_time;
+    """, (category, category))
+    
+    events = [Event(
+        event_time=row[0],
+        event_type=row[1],
+        product_id=row[2],
+        category_id=row[3],
+        category_1=row[4],
+        brand=row[5],
+        price=row[6],
+        user_id=row[7],
+        user_session=row[8]
+    ).dict() for row in cursor.fetchall()]
 
-    if message['work_type'].lower() == 'never worked':
-        work_type_encoded['work_type_Never_worked'] = 1
-    elif message['work_type'].lower() == 'private':
-        work_type_encoded['work_type_Private'] = 1
-    elif message['work_type'].lower() == 'self-employed':
-        work_type_encoded['work_type_Self-employed'] = 1
-    elif message['work_type'].lower() == 'children':
-        work_type_encoded['work_type_children'] = 1
+    conn.close()
+    print(events)
+    return {"events": events}
 
-    del message['work_type']
+@app.post("/predict")
+async def predict(events: list[Event], api_key: str = Depends(get_api_key)):
+    try:
+        # Convertir la lista de eventos a un DataFrame
+        df = pd.DataFrame([event.dict() for event in events])
+        
+        # Hacer las predicciones
+        predictions, probabilities = loaded_model.predict(df)
+        
+        # Devolver las predicciones y probabilidades
+        return {"predictions": predictions.tolist(), "probabilities": probabilities.tolist()}
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return message.update(work_type_encoded)
-
-def residence_encoding(message):
-    residence_encoded = {'Residence_type_Urban': 0}
-    if message['residence_type'] == 'urban':
-        residence_encoded['Residence_type_Urban'] = 1
-
-    del message['residence_type']
-
-    return message.update(residence_encoded)
-
-def smoking_encoding(message):
-    smoking_encoded = {'smoking_status_formerly smoked': 0, 'smoking_status_never smoked': 0,
-                       'smoking_status_smokes': 0}
-    if message['smoking_status'] == 'formerly smoked':
-        smoking_encoded['smoking_status_formerly smoked'] = 1
-    elif message['smoking_status'] == 'never smoked':
-        smoking_encoded['smoking_status_never smoked'] = 1
-    elif message['smoking_status'] == 'smokes':
-        smoking_encoded['smoking_status_smokes'] = 1
-
-    del message['smoking_status']
-
-    return message.update(smoking_encoded)
-
-def data_prep(message):
-    gender_encoding(message)
-    work_type_encoding(message)
-    residence_encoding(message)
-    smoking_encoding(message)
-
-    return pd.DataFrame(message, index=[0])
-
-
-def heart_prediction(message: dict):
-    # Data Prep
-    data = data_prep(message)
-    label = model.predict(data)[0]
-    return {'label': int(label)}
-
-
-
-@app.get('/')
-def main():
-    return {'message': 'Hola'}
-
-@app.post('/heart-attack-prediction/')
-def predict_heart_attack(message: dict):
-    model_pred = heart_prediction(message)
-    # return {'prediction': model_pred}
-    return model_pred
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
